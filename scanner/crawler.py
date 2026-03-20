@@ -59,13 +59,14 @@ COMPRESSED_EXTENSIONS = {
 
 # AWS-managed log prefixes that almost never contain credentials.
 # Skipped by default; override with --include-awslogs.
+# NOTE: Keep these specific — avoid short/generic names that collide with
+# legitimate user folders (e.g. "config/").  CloudTrail & Config logs are
+# already covered by the "AWSLogs/" umbrella prefix.
 AWSLOGS_PREFIXES = (
     "AWSLogs/",
     "aws-logs/",
     "elasticloadbalancing/",
     "vpcflowlogs/",
-    "CloudTrail/",
-    "Config/",
 )
 
 
@@ -306,10 +307,19 @@ def _list_objects(
                     continue
 
                 # ── Reject excluded key prefixes (AWSLogs, custom, etc.) ──────
+                # Case-sensitive check first (preserves built-in prefix casing),
+                # then case-insensitive only for user-supplied --exclude-prefixes.
                 matched_prefix = next(
-                    (p for p in exclude_prefixes if key.startswith(p) or key_lower.startswith(p.lower())),
+                    (p for p in exclude_prefixes if key.startswith(p)),
                     None,
                 )
+                if matched_prefix is None:
+                    # Case-insensitive fallback for user-supplied patterns only
+                    matched_prefix = next(
+                        (p for p in exclude_prefixes
+                         if p not in AWSLOGS_PREFIXES and key_lower.startswith(p.lower())),
+                        None,
+                    )
                 if matched_prefix:
                     skipped_prefix[matched_prefix] = skipped_prefix.get(matched_prefix, 0) + 1
                     continue
