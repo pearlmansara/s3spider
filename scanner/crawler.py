@@ -181,15 +181,31 @@ def crawl_bucket(
         scan_all, sample_groups = _group_keys_by_pattern(keys, sample_threshold)
 
         total_sampled_skipped = 0
+        last_folder: str | None = None
 
         for pattern, members in sample_groups.items():
+            # Derive the folder from the pattern (everything before last /)
+            folder = pattern.rpartition("/")[0] or "/"
+
+            # Print folder header when we enter a new folder
+            if folder != last_folder:
+                console.print(
+                    f"\n    [bold cyan]  📂 Entering folder:[/bold cyan] "
+                    f"[white]{escape(folder)}/[/white]  "
+                    f"[dim]({len(members)} file(s) matching pattern)[/dim]"
+                )
+                last_folder = folder
+
             # Pick one representative (first member)
             representative = members[0]
             rep_key, rep_size = representative
 
             console.print(
-                f"    [yellow][~] Pattern group:[/yellow] [dim]{escape(pattern)}[/dim]  "
+                f"    [yellow]  [~] Pattern:[/yellow] [dim]{escape(pattern.rpartition('/')[2])}[/dim]  "
                 f"[dim]({len(members)} files)[/dim]"
+            )
+            console.print(
+                f"        Sampling: [dim]{escape(rep_key)}[/dim]"
             )
 
             # Sample the representative synchronously (before thread pool)
@@ -210,7 +226,7 @@ def crawl_bucket(
             if sample_findings:
                 # Representative had findings — scan all members
                 console.print(
-                    f"    [red]  ↳ Sample had findings — scanning all {len(members)} file(s)[/red]"
+                    f"    [red]  ↳ Findings in sample — scanning all {len(members)} file(s) in this pattern[/red]"
                 )
                 scan_all.extend(members)
                 with _lock:
@@ -224,11 +240,24 @@ def crawl_bucket(
                 console.print(
                     f"    [green]  ↳ Sample clean — skipping {skipped:,} similar file(s)[/green]"
                 )
+                if skipped > 0:
+                    console.print(
+                        f"    [dim]  ⏭  Skipped folder pattern: "
+                        f"[yellow]{escape(folder)}/[{escape(pattern.rpartition('/')[2])}][/yellow]"
+                        f" ({skipped:,} file(s) skipped)[/dim]"
+                    )
 
         if total_sampled_skipped:
             console.print(
-                f"    [green]Sampling saved {total_sampled_skipped:,} download(s)[/green]"
+                f"\n    [bold green]  ✔ Sampling saved {total_sampled_skipped:,} download(s)[/bold green]"
             )
+
+        # Print folders being scanned normally
+        scan_folders = sorted(set(k.rpartition("/")[0] for k, _ in scan_all if "/" in k))
+        if scan_folders:
+            console.print(f"    [dim]  Scanning {len(scan_all)} unique/unsampled file(s) across {len(scan_folders)} folder(s)[/dim]")
+            for f in scan_folders:
+                console.print(f"    [dim]    → {escape(f)}/[/dim]")
 
         keys_to_scan = scan_all
         console.print(f"    [green]{len(keys_to_scan)} object(s) remaining to scan[/green]")

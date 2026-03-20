@@ -11,11 +11,19 @@ logger = logging.getLogger("s3spider")
 # ── Extension groups ──────────────────────────────────────────────────────────
 
 TEXT_EXTENSIONS = {
+    # Config / secrets
     ".txt", ".log", ".csv", ".env", ".conf", ".config", ".yaml", ".yml",
-    ".json", ".xml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".py", ".rb",
-    ".js", ".ts", ".php", ".sql", ".md", ".toml", ".properties", ".gradle",
+    ".json", ".xml", ".ini", ".cfg", ".toml", ".properties",
+    # Code
+    ".sh", ".bash", ".zsh", ".py", ".rb", ".js", ".ts", ".php", ".sql",
+    ".md", ".gradle",
+    # Terraform
     ".tf", ".tfvars", ".tfstate", ".tfstate.backup",
+    # Certificates / keys
     ".pem", ".key", ".crt", ".cer", ".pub",
+    # Output / error / misc text files
+    ".out", ".err", ".error", ".output", ".result", ".results",
+    ".stdout", ".stderr", ".trace", ".dump",
 }
 
 DOCX_EXTENSIONS = {".docx", ".doc"}
