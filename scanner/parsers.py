@@ -14,7 +14,8 @@ TEXT_EXTENSIONS = {
     ".txt", ".log", ".csv", ".env", ".conf", ".config", ".yaml", ".yml",
     ".json", ".xml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".py", ".rb",
     ".js", ".ts", ".php", ".sql", ".md", ".toml", ".properties", ".gradle",
-    ".tf", ".tfvars", ".pem", ".key", ".crt", ".cer", ".pub",
+    ".tf", ".tfvars", ".tfstate", ".tfstate.backup",
+    ".pem", ".key", ".crt", ".cer", ".pub",
 }
 
 DOCX_EXTENSIONS = {".docx", ".doc"}

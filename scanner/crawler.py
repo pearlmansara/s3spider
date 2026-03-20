@@ -27,6 +27,26 @@ logger = logging.getLogger("s3spider")
 _lock = threading.Lock()
 
 
+# Compressed/binary file extensions that are never useful to scan and
+# should be rejected at the listing phase (before any download occurs).
+COMPRESSED_EXTENSIONS = {
+    ".gz", ".gzip", ".bz2", ".xz", ".zst", ".zstd",
+    ".tar", ".tgz", ".tar.gz", ".tar.bz2",
+    ".zip", ".7z", ".rar",
+}
+
+# AWS-managed log prefixes that almost never contain credentials.
+# Skipped by default; override with --include-awslogs.
+AWSLOGS_PREFIXES = (
+    "AWSLogs/",
+    "aws-logs/",
+    "elasticloadbalancing/",
+    "vpcflowlogs/",
+    "CloudTrail/",
+    "Config/",
+)
+
+
 def crawl_bucket(
     session,
     bucket: dict,
@@ -37,6 +57,8 @@ def crawl_bucket(
     download_dir: str = "downloads",
     extensions: set | None = None,
     keywords_only: bool = False,
+    exclude_prefixes: list[str] | None = None,
+    include_awslogs: bool = False,
 ) -> list[dict]:
     """
     Crawl all objects in a bucket and return findings.
@@ -61,8 +83,13 @@ def crawl_bucket(
         f"[dim]({region})[/dim]"
     )
 
+    # Build the full prefix exclusion list for this crawl
+    active_exclude_prefixes: list[str] = list(exclude_prefixes or [])
+    if not include_awslogs:
+        active_exclude_prefixes.extend(AWSLOGS_PREFIXES)
+
     # ── Step 1: list all matching objects ────────────────────────────────────
-    keys = _list_objects(s3, bucket_name, extensions, max_bytes)
+    keys = _list_objects(s3, bucket_name, extensions, max_bytes, active_exclude_prefixes)
 
     if not keys:
         console.print(f"    [dim]No matching objects found in {bucket_name}[/dim]")
@@ -124,9 +151,11 @@ def _list_objects(
     bucket_name: str,
     extensions: set | None,
     max_bytes: int,
+    exclude_prefixes: list[str],
 ) -> list[tuple[str, int]]:
     """Paginate through all objects and return list of (key, size) tuples."""
     keys = []
+    skipped_prefix: dict[str, int] = {}
     paginator = s3.get_paginator("list_objects_v2")
     try:
         for page in paginator.paginate(Bucket=bucket_name):
@@ -134,15 +163,29 @@ def _list_objects(
                 key  = obj["Key"]
                 size = obj.get("Size", 0)
 
-                # Skip oversized files
+                # ── Reject compressed/archive files immediately ───────────────
+                key_lower = key.lower()
+                if any(key_lower.endswith(ext) for ext in COMPRESSED_EXTENSIONS):
+                    logger.debug(f"Skipping compressed file: {key}")
+                    continue
+
+                # ── Reject excluded key prefixes (AWSLogs, custom, etc.) ──────
+                matched_prefix = next(
+                    (p for p in exclude_prefixes if key.startswith(p) or key_lower.startswith(p.lower())),
+                    None,
+                )
+                if matched_prefix:
+                    skipped_prefix[matched_prefix] = skipped_prefix.get(matched_prefix, 0) + 1
+                    continue
+
+                # ── Skip oversized files ──────────────────────────────────────
                 if size > max_bytes:
                     logger.debug(f"Skipping {key} — too large ({size / 1024 / 1024:.1f} MB)")
                     continue
 
-                # Skip unsupported extensions (or all if no filter)
+                # ── Extension filter ──────────────────────────────────────────
                 if extensions:
-                    lower = key.lower()
-                    if not any(lower.endswith(ext) for ext in extensions):
+                    if not any(key_lower.endswith(ext) for ext in extensions):
                         continue
                 else:
                     if not is_supported(key):
@@ -151,6 +194,14 @@ def _list_objects(
                 keys.append((key, size))
     except ClientError as e:
         logger.error(f"Error listing objects in {bucket_name}: {e}")
+
+    # Report how many objects were skipped per prefix
+    for prefix, count in sorted(skipped_prefix.items()):
+        console.print(
+            f"    [dim]Skipped {count:,} object(s) under prefix "
+            f"[yellow]{prefix}[/yellow] (excluded)[/dim]"
+        )
+
     return keys
 
 

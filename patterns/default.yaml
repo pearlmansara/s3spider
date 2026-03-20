@@ -86,3 +86,23 @@ patterns:
   - name: Hardcoded Username
     regex: '(?i)(username|user|login|uname)\s*[=:]\s*[''"]?([^\s''"]{3,})[''"]?'
     severity: low
+
+  - name: Terraform State - Sensitive Value
+    regex: '"value":\s*"(?!null)[^"]{6,}"'
+    severity: high
+
+  - name: Terraform State - Password Attribute
+    regex: '"(?:password|passwd|secret|token|api_key|access_key|secret_key|private_key|auth_token|client_secret)":\s*"(?!null|"")[^"]{4,}"'
+    severity: critical
+
+  - name: Terraform State - AWS Provider Credentials
+    regex: '"(?:access_key|secret_key)":\s*"[A-Za-z0-9/+=]{16,}"'
+    severity: critical
+
+  - name: Terraform State - Connection String
+    regex: '"(?:connection_string|conn_string|database_url|db_url|jdbc_url)":\s*"[^"]+"'
+    severity: critical
+
+  - name: Terraform - Variable with Sensitive Marker
+    regex: '(?i)sensitive\s*=\s*true'
+    severity: medium

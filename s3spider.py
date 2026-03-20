@@ -65,8 +65,14 @@ Examples:
   # Exclude buckets matching patterns + CloudTrail excluded by default
   python s3spider.py --profiles prod --exclude-buckets backup archive
 
+  # Skip specific S3 key prefixes (AWSLogs/ excluded by default automatically)
+  python s3spider.py --profiles prod --exclude-prefixes logs/ tmp/ audit/
+
   # Force-include CloudTrail buckets (excluded by default)
   python s3spider.py --profiles prod --include-cloudtrail
+
+  # Force-include AWSLogs/ and AWS log prefixes (excluded by default)
+  python s3spider.py --profiles prod --include-awslogs
 
   # Use a custom patterns file
   python s3spider.py --profiles prod --patterns-file my_patterns.yaml
@@ -123,10 +129,25 @@ Examples:
              "E.g. --exclude-buckets backup archive temp",
     )
     parser.add_argument(
+        "--exclude-prefixes",
+        nargs="+",
+        metavar="PREFIX",
+        default=None,
+        help="Skip S3 object keys that start with these prefixes (case-insensitive). "
+             "E.g. --exclude-prefixes logs/ backup/ tmp/  "
+             "Note: AWSLogs/ and common AWS log prefixes are already excluded by default.",
+    )
+    parser.add_argument(
         "--include-cloudtrail",
         action="store_true",
         help="Include CloudTrail buckets in the scan (excluded by default because "
              "they are very large and rarely contain useful secrets).",
+    )
+    parser.add_argument(
+        "--include-awslogs",
+        action="store_true",
+        help="Include objects under AWSLogs/, CloudTrail/, Config/, vpcflowlogs/ etc. "
+             "(excluded by default — these are AWS service log folders with no credentials).",
     )
     parser.add_argument(
         "--threads",
@@ -261,6 +282,19 @@ def main():
             f"{', '.join(repr(p) for p in exclude_patterns)}[/dim]"
         )
 
+    # ── Key prefix exclusions ──────────────────────────────────────────────────
+    exclude_prefixes: list[str] = list(args.exclude_prefixes or [])
+    if not args.include_awslogs:
+        console.print(
+            "[dim][*] AWSLogs/ and AWS service log prefixes excluded by default "
+            "(use --include-awslogs to override)[/dim]"
+        )
+    if exclude_prefixes:
+        console.print(
+            f"[dim][*] Additional key prefix exclusions: "
+            f"{', '.join(repr(p) for p in exclude_prefixes)}[/dim]"
+        )
+
     console.print()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -359,6 +393,8 @@ def main():
             download_dir=args.download_dir,
             extensions=extensions,
             keywords_only=args.content_only,
+            exclude_prefixes=exclude_prefixes,
+            include_awslogs=args.include_awslogs,
         )
         all_findings.extend(findings)
         console.print()
