@@ -74,6 +74,12 @@ Examples:
   # Force-include AWSLogs/ and AWS log prefixes (excluded by default)
   python s3spider.py --profiles prod --include-awslogs
 
+  # Adjust sampling threshold (scan 1 file per pattern group of >= 5)
+  python s3spider.py --profiles prod --sample-threshold 5
+
+  # Disable sampling entirely (scan every file)
+  python s3spider.py --profiles prod --no-sample
+
   # Use a custom patterns file
   python s3spider.py --profiles prod --patterns-file my_patterns.yaml
 
@@ -148,6 +154,21 @@ Examples:
         action="store_true",
         help="Include objects under AWSLogs/, CloudTrail/, Config/, vpcflowlogs/ etc. "
              "(excluded by default — these are AWS service log folders with no credentials).",
+    )
+    parser.add_argument(
+        "--sample-threshold",
+        type=int,
+        default=10,
+        metavar="N",
+        help="If a folder prefix contains >= N files with the same naming pattern, "
+             "scan only 1 representative file first. If clean, skip the rest. "
+             "(default: 10 — set to 0 to disable)",
+    )
+    parser.add_argument(
+        "--no-sample",
+        action="store_true",
+        help="Disable smart sampling — scan every file regardless of naming patterns. "
+             "Thorough but slower.",
     )
     parser.add_argument(
         "--threads",
@@ -395,6 +416,8 @@ def main():
             keywords_only=args.content_only,
             exclude_prefixes=exclude_prefixes,
             include_awslogs=args.include_awslogs,
+            sample_threshold=args.sample_threshold,
+            no_sample=args.no_sample,
         )
         all_findings.extend(findings)
         console.print()

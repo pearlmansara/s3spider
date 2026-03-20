@@ -3,8 +3,10 @@ crawler.py - List and stream S3 objects, then scan them for sensitive data.
 """
 
 import os
+import re
 import logging
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -25,6 +27,26 @@ logger = logging.getLogger("s3spider")
 
 # Lock for thread-safe console output and findings list appending
 _lock = threading.Lock()
+
+# ── Filename normalisation regexes (order matters — most specific first) ──────
+_NORM_PATTERNS = [
+    # UUID with dashes (must come BEFORE date patterns to avoid partial matches)
+    (re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE), '{uuid}'),
+    # 32-char hex (UUID without dashes)
+    (re.compile(r'\b[0-9a-f]{32}\b', re.IGNORECASE), '{uuid}'),
+    # Full ISO datetime / timestamps  e.g. 2024-01-15T10:30:00Z
+    (re.compile(r'\d{4}[-_]\d{2}[-_]\d{2}[T_]\d{2}[-:]\d{2}[-:]\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?'), '{datetime}'),
+    # Date with separators: 2024-01-15  or  2024/01/15
+    (re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}'), '{date}'),
+    # Compact date: 20240115
+    (re.compile(r'\b\d{8}\b'), '{date}'),
+    # Unix epoch timestamps (10 or 13 digits)
+    (re.compile(r'\b1[0-9]{9,12}\b'), '{timestamp}'),
+    # Long pure-numeric IDs (5+ digits)
+    (re.compile(r'\b\d{5,}\b'), '{id}'),
+    # Remaining hex strings (8+ chars)
+    (re.compile(r'\b[0-9a-f]{8,}\b', re.IGNORECASE), '{hex}'),
+]
 
 
 # Compressed/binary file extensions that are never useful to scan and
@@ -47,6 +69,52 @@ AWSLOGS_PREFIXES = (
 )
 
 
+def _normalize_filename(key: str) -> str:
+    """
+    Replace variable parts of a filename (dates, UUIDs, IDs, hex) with
+    generic placeholders so that files following the same naming convention
+    collapse to the same pattern.
+
+    Only the *basename* (last path component) is normalised; the prefix/folder
+    is kept verbatim so pattern grouping stays within each folder.
+    """
+    prefix, _, basename = key.rpartition("/")
+    norm = basename
+    for pattern, replacement in _NORM_PATTERNS:
+        norm = pattern.sub(replacement, norm)
+    return f"{prefix}/{norm}" if prefix else norm
+
+
+def _group_keys_by_pattern(
+    keys: list[tuple[str, int]],
+    sample_threshold: int,
+) -> tuple[list[tuple[str, int]], dict[str, list[tuple[str, int]]]]:
+    """
+    Split keys into:
+      - scan_all:    keys that should always be scanned (unique patterns or
+                     small groups below the threshold)
+      - sample_groups: {pattern_str: [key_info, ...]} where each group has
+                       >= sample_threshold members and will be sampled
+    """
+    # Group by (folder_prefix, normalised_filename_pattern)
+    groups: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for ki in keys:
+        key = ki[0]
+        pattern = _normalize_filename(key)
+        groups[pattern].append(ki)
+
+    scan_all: list[tuple[str, int]] = []
+    sample_groups: dict[str, list[tuple[str, int]]] = {}
+
+    for pattern, members in groups.items():
+        if len(members) >= sample_threshold:
+            sample_groups[pattern] = members
+        else:
+            scan_all.extend(members)
+
+    return scan_all, sample_groups
+
+
 def crawl_bucket(
     session,
     bucket: dict,
@@ -59,9 +127,15 @@ def crawl_bucket(
     keywords_only: bool = False,
     exclude_prefixes: list[str] | None = None,
     include_awslogs: bool = False,
+    sample_threshold: int = 10,
+    no_sample: bool = False,
 ) -> list[dict]:
     """
     Crawl all objects in a bucket and return findings.
+
+    Smart sampling: for any folder where many files share the same naming
+    pattern, one representative is scanned first. If it's clean, the rest
+    are skipped. Files with unique/different naming patterns are always scanned.
 
     Each finding dict:
     {
@@ -95,11 +169,73 @@ def crawl_bucket(
         console.print(f"    [dim]No matching objects found in {bucket_name}[/dim]")
         return []
 
-    console.print(f"    [green]{len(keys)} object(s) to scan[/green]")
-
     all_findings: list[dict] = []
 
-    # ── Step 2: download + scan concurrently ─────────────────────────────────
+    # ── Step 2: smart pattern-based sampling ─────────────────────────────────
+    if no_sample or sample_threshold <= 0:
+        # No sampling — scan everything
+        keys_to_scan = keys
+        console.print(f"    [green]{len(keys_to_scan)} object(s) to scan (sampling disabled)[/green]")
+    else:
+        scan_all, sample_groups = _group_keys_by_pattern(keys, sample_threshold)
+
+        total_sampled_skipped = 0
+
+        for pattern, members in sample_groups.items():
+            # Pick one representative (first member)
+            representative = members[0]
+            rep_key, rep_size = representative
+
+            console.print(
+                f"    [yellow][~] Pattern group:[/yellow] [dim]{escape(pattern)}[/dim]  "
+                f"[dim]({len(members)} files)[/dim]"
+            )
+
+            # Sample the representative synchronously (before thread pool)
+            sample_findings = _process_object(
+                s3=s3,
+                bucket_name=bucket_name,
+                key=rep_key,
+                size=rep_size,
+                detector=detector,
+                profile=profile,
+                region=region,
+                bucket_arn=bucket_arn,
+                download=download,
+                download_dir=download_dir,
+                keywords_only=keywords_only,
+            )
+
+            if sample_findings:
+                # Representative had findings — scan all members
+                console.print(
+                    f"    [red]  ↳ Sample had findings — scanning all {len(members)} file(s)[/red]"
+                )
+                scan_all.extend(members)
+                with _lock:
+                    all_findings.extend(sample_findings)
+                    for finding in sample_findings:
+                        _print_finding(finding)
+            else:
+                # Representative was clean — skip the rest
+                skipped = len(members) - 1
+                total_sampled_skipped += skipped
+                console.print(
+                    f"    [green]  ↳ Sample clean — skipping {skipped:,} similar file(s)[/green]"
+                )
+
+        if total_sampled_skipped:
+            console.print(
+                f"    [green]Sampling saved {total_sampled_skipped:,} download(s)[/green]"
+            )
+
+        keys_to_scan = scan_all
+        console.print(f"    [green]{len(keys_to_scan)} object(s) remaining to scan[/green]")
+
+    if not keys_to_scan:
+        return all_findings
+
+    # ── Step 3: scan remaining keys concurrently ─────────────────────────────
     with Progress(
         SpinnerColumn(),
         TextColumn("    [progress.description]{task.description}"),
@@ -110,7 +246,7 @@ def crawl_bucket(
         console=console,
         transient=True,
     ) as progress:
-        task_id = progress.add_task(f"Scanning {bucket_name}", total=len(keys))
+        task_id = progress.add_task(f"Scanning {bucket_name}", total=len(keys_to_scan))
 
         def process_key(key_info):
             key, size = key_info
@@ -131,7 +267,7 @@ def crawl_bucket(
             return findings
 
         with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = {executor.submit(process_key, ki): ki for ki in keys}
+            futures = {executor.submit(process_key, ki): ki for ki in keys_to_scan}
             for future in as_completed(futures):
                 try:
                     result = future.result()
