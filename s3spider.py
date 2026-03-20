@@ -56,6 +56,18 @@ Examples:
   # Scan only .env and .json files, download matches
   python s3spider.py --profiles dev --extensions .env .json --download
 
+  # Search for specific keywords (like MANSPIDER -c)
+  python s3spider.py --profiles dev --content password secret apikey
+
+  # Keyword-only mode (skip built-in regex patterns)
+  python s3spider.py --profiles dev --content password --content-only
+
+  # Exclude buckets matching patterns + CloudTrail excluded by default
+  python s3spider.py --profiles prod --exclude-buckets backup archive
+
+  # Force-include CloudTrail buckets (excluded by default)
+  python s3spider.py --profiles prod --include-cloudtrail
+
   # Use a custom patterns file
   python s3spider.py --profiles prod --patterns-file my_patterns.yaml
 
@@ -84,10 +96,37 @@ Examples:
              "Defaults to all supported extensions.",
     )
     parser.add_argument(
+        "--content", "-c",
+        nargs="+",
+        metavar="WORD",
+        default=None,
+        help="Plain keyword(s) to search for in file contents (case-insensitive). "
+             "Mirrors MANSPIDER's -c flag. E.g. --content password secret apikey",
+    )
+    parser.add_argument(
+        "--content-only",
+        action="store_true",
+        help="Only run --content keyword searches; skip all built-in regex patterns.",
+    )
+    parser.add_argument(
         "--patterns-file",
         metavar="FILE",
         default=None,
         help="Path to a custom YAML patterns file (merged with built-in patterns).",
+    )
+    parser.add_argument(
+        "--exclude-buckets",
+        nargs="+",
+        metavar="PATTERN",
+        default=None,
+        help="Skip buckets whose name contains any of these substrings (case-insensitive). "
+             "E.g. --exclude-buckets backup archive temp",
+    )
+    parser.add_argument(
+        "--include-cloudtrail",
+        action="store_true",
+        help="Include CloudTrail buckets in the scan (excluded by default because "
+             "they are very large and rarely contain useful secrets).",
     )
     parser.add_argument(
         "--threads",
@@ -179,16 +218,49 @@ def main():
         timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"s3spider_{timestamp}.xlsx"
 
+    # ── Validate --content-only usage ─────────────────────────────────────────
+    if args.content_only and not args.content:
+        console.print(
+            "[bold red][!] --content-only requires at least one --content keyword.[/bold red]"
+        )
+        sys.exit(1)
+
     # ── Load detector ─────────────────────────────────────────────────────────
-    detector = Detector()  # loads built-in default.yaml
-    if args.patterns_file:
-        if not os.path.isfile(args.patterns_file):
-            console.print(f"[bold red][!] Patterns file not found: {args.patterns_file}[/bold red]")
-            sys.exit(1)
-        detector.add_patterns_from_file(args.patterns_file)
-        console.print(f"[dim][*] Loaded additional patterns from {args.patterns_file}[/dim]")
+    # If --content-only, skip loading the built-in regex patterns entirely
+    detector = Detector(no_default_patterns=args.content_only)
+
+    if not args.content_only:
+        if args.patterns_file:
+            if not os.path.isfile(args.patterns_file):
+                console.print(f"[bold red][!] Patterns file not found: {args.patterns_file}[/bold red]")
+                sys.exit(1)
+            detector.add_patterns_from_file(args.patterns_file)
+            console.print(f"[dim][*] Loaded additional patterns from {args.patterns_file}[/dim]")
+
+    if args.content:
+        detector.add_keywords(args.content)
+        console.print(
+            f"[dim][*] Keyword search terms: {', '.join(repr(k) for k in args.content)}[/dim]"
+        )
+
+    if args.content_only:
+        console.print(f"[dim][*] Mode: keyword-only (built-in regex patterns disabled)[/dim]")
 
     console.print(f"[dim][*] {len(detector.patterns)} detection pattern(s) loaded[/dim]")
+
+    # ── Build bucket exclusion list ────────────────────────────────────────────
+    exclude_patterns: list[str] = []
+    if not args.include_cloudtrail:
+        exclude_patterns.append("cloudtrail")
+    if args.exclude_buckets:
+        exclude_patterns.extend(args.exclude_buckets)
+
+    if exclude_patterns:
+        console.print(
+            f"[dim][*] Bucket exclusions (name contains): "
+            f"{', '.join(repr(p) for p in exclude_patterns)}[/dim]"
+        )
+
     console.print()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -231,6 +303,33 @@ def main():
         console.print("[bold yellow][!] No readable buckets found. Exiting.[/bold yellow]")
         sys.exit(0)
 
+    # ── Apply bucket exclusions ───────────────────────────────────────────────
+    if exclude_patterns:
+        excluded = []
+        kept = []
+        for b in readable_buckets:
+            name_lower = b["name"].lower()
+            matched = next(
+                (p for p in exclude_patterns if p.lower() in name_lower), None
+            )
+            if matched:
+                excluded.append((b["name"], matched))
+            else:
+                kept.append(b)
+
+        if excluded:
+            for name, reason in excluded:
+                console.print(
+                    f"[dim][-] Skipping bucket [white]{name}[/white] "
+                    f"(matches exclusion pattern '[yellow]{reason}[/yellow]')[/dim]"
+                )
+            console.print()
+        readable_buckets = kept
+
+    if not readable_buckets:
+        console.print("[bold yellow][!] All readable buckets were excluded. Exiting.[/bold yellow]")
+        sys.exit(0)
+
     console.print(
         f"[bold green][*] Proceeding to scan {len(readable_buckets)} readable bucket(s)...[/bold green]"
     )
@@ -259,6 +358,7 @@ def main():
             download=args.download,
             download_dir=args.download_dir,
             extensions=extensions,
+            keywords_only=args.content_only,
         )
         all_findings.extend(findings)
         console.print()

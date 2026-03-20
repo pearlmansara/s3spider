@@ -36,6 +36,7 @@ def crawl_bucket(
     download: bool = False,
     download_dir: str = "downloads",
     extensions: set | None = None,
+    keywords_only: bool = False,
 ) -> list[dict]:
     """
     Crawl all objects in a bucket and return findings.
@@ -97,6 +98,7 @@ def crawl_bucket(
                 bucket_arn=bucket_arn,
                 download=download,
                 download_dir=download_dir,
+                keywords_only=keywords_only,
             )
             progress.advance(task_id)
             return findings
@@ -163,6 +165,7 @@ def _process_object(
     bucket_arn: str,
     download: bool,
     download_dir: str,
+    keywords_only: bool = False,
 ) -> list[dict]:
     """Download (stream) and scan a single S3 object."""
     findings = []
@@ -183,7 +186,7 @@ def _process_object(
         return findings
 
     # Scan for sensitive data
-    raw_findings = detector.scan(text)
+    raw_findings = detector.scan(text, keywords_only=keywords_only)
     for f in raw_findings:
         findings.append({
             "profile":      profile,
